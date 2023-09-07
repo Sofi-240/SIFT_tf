@@ -1,6 +1,6 @@
 from typing import Union
 import tensorflow as tf
-from cv_models.utils import PI, gaussian_kernel, compute_extrema3D, \
+from utils import PI, gaussian_kernel, compute_extrema3D, \
     make_neighborhood2D, compute_central_gradient3D, compute_hessian_3D
 from tensorflow.python.keras import backend
 from collections import namedtuple
