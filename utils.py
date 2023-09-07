@@ -1,10 +1,146 @@
 import tensorflow as tf
-from typing import Union
-import numpy as np
+from typing import Union, TypeVar
+from collections import namedtuple
 
 PI = tf.cast(
     tf.math.angle(tf.constant(-1, dtype=tf.complex64)), tf.float32
 )
+
+KT = TypeVar('KT', bound='KeyPoints')
+unpacked_octave = namedtuple('unpacked_octave', 'octave, layer, scale')
+
+
+class Octave:
+    def __init__(self, index: int, gss: tf.Tensor):
+        self.__shape = gss.get_shape().as_list()
+        self.index = index
+        self.gss = gss
+        self.dx, self.dy, self.magnitude, self.orientation = compute_grad_mag_ori(gss)
+
+    @property
+    def shape(self):
+        return self.__shape
+
+
+class KeyPoints:
+    def __init__(self, pt: Union[None, tf.Tensor] = None, size: Union[None, tf.Tensor] = None,
+                 angle: Union[None, tf.Tensor] = None, octave: Union[None, tf.Tensor] = None,
+                 response: Union[None, tf.Tensor] = None, as_image_size: bool = False):
+        self.scale_index = None
+        self.__shape = (0, )
+        self.pt = tf.constant([[]], shape=(0, 3), dtype=tf.float32)
+        self.size = tf.constant([[]], shape=(0, 1), dtype=tf.float32)
+        self.angle = tf.constant([[]], shape=(0, 1), dtype=tf.float32)
+        self.octave = tf.constant([[]], shape=(0, 1), dtype=tf.float32)
+        self.response = tf.constant([[]], shape=(0, 1), dtype=tf.float32)
+        self.as_image_size = as_image_size
+        if pt is not None: self.__constructor(pt, size, angle, octave, response)
+
+    def __add__(self, other: KT) -> KT:
+        if not isinstance(other, KeyPoints): raise TypeError
+        if self.as_image_size ^ other.as_image_size: raise ValueError('the as_image_size parameter not inconsistent')
+        if (self.scale_index is None) ^ (other.scale_index is None):
+            if self.scale_index is None:
+                self.scale_index = tf.ones((self.shape[0], 1), tf.float32) * -1
+            else:
+                other.scale_index = tf.ones((other.shape[0], 1), tf.float32) * -1
+        ints = self.from_array(tf.concat((self.as_array(), other.as_array()), axis=0), inplace=False)
+        return ints
+
+    def __iadd__(self, other: KT) -> KT:
+        if not isinstance(other, KeyPoints): raise TypeError
+        if self.as_image_size ^ other.as_image_size: raise ValueError('the as_image_size parameter not inconsistent')
+        if (self.scale_index is None) ^ (other.scale_index is None):
+            if self.scale_index is None:
+                self.scale_index = tf.ones((self.shape[0], 1), tf.float32) * -1
+            else:
+                other.scale_index = tf.ones((other.shape[0], 1), tf.float32) * -1
+        self.from_array(tf.concat((self.as_array(), other.as_array()), axis=0), inplace=True)
+        return self
+
+    def __constructor(self, pt, size, angle, octave, response):
+        if not isinstance(pt, tf.Tensor): raise ValueError('All the fields need to be type of tf.Tensor')
+        _shape = pt.get_shape().as_list()
+        if len(_shape) > 2:
+            pt = tf.squeeze(pt)
+            _shape = pt.get_shape().as_list()
+        if len(_shape) != 2 or _shape[-1] < 3: raise ValueError(
+            'expected "pt" to be 2D tensor with size of (None, 3 or 4)')
+        if _shape[-1] == 4:
+            pt, scale_index = tf.split(pt, [3, 1], axis=-1)
+        else:
+            scale_index = None
+        valid = [pt]
+        for f in [size, angle, octave, response]:
+            if not isinstance(f, tf.Tensor): raise ValueError('All the fields need to be type of tf.Tensor')
+            f = tf.reshape(f, (-1, 1))
+            if f.get_shape()[0] != _shape[0]: raise ValueError('All the fields need to be with the same first dim size')
+            valid.append(f)
+        self.pt, self.size, self.angle, self.octave, self.response = valid
+        self.scale_index = scale_index
+        self.__shape = (_shape[0], )
+
+    @property
+    def shape(self) -> tuple:
+        return self.__shape
+
+    def as_array(self) -> tf.Tensor:
+        _array = [self.pt]
+        _array += [self.scale_index] if self.scale_index is not None else []
+        _array += [self.size, self.angle, self.octave, self.response]
+        return tf.concat(_array, axis=-1)
+
+    def from_array(self, array: tf.Tensor, inplace=False) -> Union[None, KT]:
+        _shape = array.get_shape().as_list()
+        if len(_shape) != 2 or _shape[1] < 7: raise ValueError('array rank need to be 2 with size of (None, 7 or 8)')
+        splits = [4] if _shape[1] == 8 else [3]
+        splits += [1, 1, 1, 1]
+        split = tf.split(array, splits, axis=-1)
+        if not inplace: return KeyPoints(*split, as_image_size=self.as_image_size)
+        self.__constructor(*split)
+
+    def to_image_size(self, inplace=False) -> Union[None, KT]:
+        if self.shape[0] == 0 or self.as_image_size: return self if not inplace else None
+        pt_unpack = self.pt * tf.constant([1.0, 0.5, 0.5], dtype=tf.float32)
+        size_unpack = self.size * 0.5
+        octave_unpack = tf.cast(self.octave, dtype=tf.int64) ^ 255
+        if inplace:
+            self.pt, self.size, self.octave = pt_unpack, size_unpack, octave_unpack
+            self.as_image_size = True
+            return
+        if self.scale_index is not None: pt_unpack = tf.concat((pt_unpack, self.scale_index), -1)
+        unpack_key_points = KeyPoints(
+            pt_unpack, size_unpack, self.angle, tf.cast(octave_unpack, dtype=tf.float32), self.response, True
+        )
+        return unpack_key_points
+
+    def relies_scale_index(self):
+        self.scale_index = None
+
+    def unpack_octave(self) -> unpacked_octave:
+        if self.shape[0] == 0: return unpacked_octave(None, None, None)
+        up_key_points = self.to_image_size(inplace=False) if not self.as_image_size else self
+
+        octave_unpack = tf.cast(up_key_points.octave, tf.int64)
+        octave = octave_unpack & 255
+        octave = (octave ^ 255) - 1
+
+        layer = tf.bitwise.left_shift(octave_unpack, 8)
+        layer = layer & 255
+
+        scale = tf.where(
+            octave >= 0, tf.cast(1 / tf.bitwise.left_shift(1, octave), dtype=tf.float32),
+            tf.cast(tf.bitwise.left_shift(1, -octave), dtype=tf.float32)
+        )
+        octave = octave + 1
+        return unpacked_octave(tf.cast(octave, dtype=tf.float32), tf.cast(layer, dtype=tf.float32), scale)
+
+    def unpack_batch(self) -> list[KT]:
+        if self.shape[0] == 0: return None
+        part = tf.reshape(tf.cast(tf.split(self.pt, [1, 2], -1)[0], tf.int32), (-1,))
+        part = tf.dynamic_partition(self.as_array(), part, tf.reduce_max(part) + 1)
+        out = [self.from_array(p, inplace=False) for p in part]
+        return out
 
 
 def gaussian_kernel(
@@ -32,72 +168,6 @@ def gaussian_kernel(
         -((xx ** 2) + (yy ** 2)) / (2.0 * (sigma ** 2))
     ) * normal
     return kernel / tf.reduce_sum(kernel)
-
-
-def gaussian_blur(
-        X: tf.Tensor,
-        kernel_size: Union[tf.Tensor, int] = 0,
-        sigma: Union[tf.Tensor, float] = 0.8
-) -> tf.Tensor:
-    shape_ = X.get_shape()
-    n_dim_ = len(shape_)
-    assert n_dim_ == 4
-    b, h, w, d = shape_
-    assert d == 1
-    _dtype = X.dtype
-
-    kernel = gaussian_kernel(kernel_size=kernel_size, sigma=sigma)
-    kernel = tf.cast(kernel, dtype=_dtype)
-    kernel_size = kernel.shape[0]
-    kernel = tf.reshape(kernel, shape=(kernel_size, kernel_size, 1, 1))
-
-    k = int(kernel_size // 2)
-    paddings = tf.constant([[0, 0], [k, k], [k, k], [0, 0]], dtype=tf.int32)
-
-    X_pad = tf.pad(X, paddings, mode='SYMMETRIC')
-    Xg = tf.nn.convolution(X_pad, kernel, padding='VALID')
-    return Xg
-
-
-def make_neighborhood3D(
-        init_cords: tf.Tensor,
-        con: int = 3,
-        origin_shape: Union[None, tuple, list, tf.TensorShape] = None
-) -> tf.Tensor:
-    B, ndim = init_cords.get_shape()
-
-    assert ndim == 4
-
-    ax = tf.range(-con // 2 + 1, (con // 2) + 1, dtype=tf.int64)
-
-    con_kernel = tf.stack(tf.meshgrid(ax, ax, ax), axis=-1)
-
-    con_kernel = tf.reshape(con_kernel, shape=(1, con ** 3, 3))
-
-    b, yxd = tf.split(init_cords, [1, 3], axis=1)
-    yxd = yxd[:, tf.newaxis, ...]
-
-    yxd = yxd + con_kernel
-
-    b = tf.repeat(b[:, tf.newaxis, ...], repeats=con ** 3, axis=1)
-
-    neighbor = tf.concat((b, yxd), axis=-1)
-    if origin_shape is None:
-        return neighbor
-
-    assert len(origin_shape) == 4
-    neighbor = neighbor + 1
-    b, y, x, d = tf.unstack(neighbor, num=4, axis=-1)
-
-    y_cast = tf.logical_and(tf.math.greater_equal(y, 1), tf.math.less_equal(y, origin_shape[1]))
-    x_cast = tf.logical_and(tf.math.greater_equal(x, 1), tf.math.less_equal(x, origin_shape[2]))
-    d_cast = tf.logical_and(tf.math.greater_equal(d, 1), tf.math.less_equal(d, origin_shape[3]))
-
-    valid = tf.cast(tf.logical_and(tf.logical_and(y_cast, x_cast), d_cast), dtype=tf.int32)
-    valid = tf.math.reduce_prod(valid, axis=-1)
-    cords_valid = tf.where(valid == 1)
-    neighbor = tf.gather_nd(neighbor, cords_valid) - 1
-    return neighbor
 
 
 def make_neighborhood2D(
@@ -139,29 +209,6 @@ def make_neighborhood2D(
     cords_valid = tf.where(valid == 1)
     neighbor = tf.gather_nd(neighbor, cords_valid) - 1
     return neighbor
-
-
-def cast_cords(
-        cords: tf.Tensor,
-        shape: Union[tf.Tensor, list, tuple]
-) -> tf.Tensor:
-    cords_shape_ = cords.get_shape()
-    assert len(cords_shape_) == 2
-    assert cords_shape_[1] == len(shape)
-
-    def cast(arr, min_val, max_val):
-        return tf.logical_and(tf.math.greater_equal(arr, min_val), tf.math.less_equal(arr, max_val))
-
-    cords_unstack = tf.unstack(cords, num=4, axis=-1)
-    masked_cords = [cast(cords_unstack[c], 0, shape[c] - 1) for c in range(1, len(shape))]
-
-    casted_ = tf.ones(shape=masked_cords[0].shape, dtype=tf.bool)
-    for mask in masked_cords:
-        casted_ = tf.math.logical_and(casted_, mask)
-
-    casted_ = tf.where(casted_)
-    ret = tf.concat([tf.reshape(tf.gather(c, casted_), (casted_.shape[0], 1)) for c in cords_unstack], axis=-1)
-    return ret
 
 
 def compute_extrema3D(
@@ -273,36 +320,6 @@ def compute_central_gradient3D(
     return grad
 
 
-def compute_central_gradient2D(
-        X: tf.Tensor
-) -> tf.Tensor:
-    _shape = tf.shape(X)
-    _n_dims = len(_shape)
-    if _n_dims != 4:
-        raise ValueError(
-            'expected the inputs to be 4D tensor with size of (None, H, W, C)'
-        )
-    b, h, w, d = tf.unstack(tf.cast(_shape, dtype=tf.int64), num=4, axis=-1)
-    X = tf.cast(X, dtype=tf.float32)
-
-    kx = tf.constant([[0.0, 0.0, 0.0], [-1.0, 0.0, 1.0], [0.0, 0.0, 0.0]], dtype=tf.float32)
-    kx = tf.reshape(kx, shape=(3, 3, 1, 1))
-    ky = tf.constant([[0.0, -1.0, 0.0], [0.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=tf.float32)
-    ky = tf.reshape(ky, shape=(3, 3, 1, 1))
-
-    kernels_dx = tf.concat((kx, ky), axis=-1)
-    transpose = False
-    if d > 1:
-        X = tf.transpose(X, perm=(0, 3, 1, 2))
-        X = tf.reshape(X, shape=(b * d, h, w, 1))
-        transpose = True
-    grad = tf.nn.convolution(X, kernels_dx, padding='VALID') * 0.5
-    if transpose:
-        grad = tf.reshape(grad, shape=(b, d, h - 2, w - 2, 2))
-        grad = tf.transpose(grad, perm=(0, 2, 3, 1, 4))
-    return grad
-
-
 def compute_hessian_3D(
         X: tf.Tensor
 ) -> tf.Tensor:
@@ -375,3 +392,17 @@ def compute_hessian_3D(
     return hessian_mat
 
 
+def compute_grad_mag_ori(
+        gss: tf.Tensor
+) -> tuple[tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor]:
+    kx = tf.constant([[0.0, 0.0, 0.0], [-1.0, 0.0, 1.0], [0.0, 0.0, 0.0]], shape=(3, 3, 1, 1, 1), dtype=tf.float32)
+    ky = tf.constant([[0.0, -1.0, 0.0], [0.0, 0.0, 0.0], [0.0, 1.0, 0.0]], shape=(3, 3, 1, 1, 1), dtype=tf.float32)
+    gradient_kernel = tf.concat((kx, ky), axis=-1)
+
+    gradient = tf.nn.convolution(tf.expand_dims(gss, -1), gradient_kernel, padding='VALID')
+    dx, dy = tf.unstack(gradient, 2, axis=-1)
+
+    magnitude = tf.math.sqrt(dx * dx + dy * dy)
+    orientation = tf.math.atan2(dy, dx) * (180.0 / PI)
+
+    return dx, dy, magnitude, orientation
