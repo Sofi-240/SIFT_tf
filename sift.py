@@ -5,6 +5,8 @@ from utils import PI, gaussian_kernel, compute_extrema3D, \
 from tensorflow.python.keras import backend
 from collections import namedtuple
 
+# https://www.cs.ubc.ca/~lowe/papers/ijcv04.pdf
+
 backend.set_floatx('float32')
 linalg_ops = tf.linalg
 math_ops = tf.math
@@ -115,13 +117,28 @@ class SIFT:
         self.octave_pyramid: list[Octave] = []
 
     def __init_graph(self, inputs: tf.Tensor) -> tuple[tf.Tensor, list[tf.Tensor]]:
+        if not isinstance(inputs, tf.Tensor): raise ValueError('Input image need to be of type Tensor')
+
         _shape = inputs.get_shape().as_list()
-        _ndims = len(_shape)
-        if _ndims != 4 or _shape[-1] != 1:
+        if len(_shape) != 4 or _shape[-1] != 1:
             raise ValueError('expected the inputs to be grayscale images with size of (None, h, w, 1)')
+
         inputs = tf.cast(inputs, dtype=tf.float32)
         _, h_, w_, _ = _shape
 
+        kernels = self.__pyramid_kernels()
+
+        min_shape = int(kernels[-1].get_shape()[0])
+        s_ = tf.cast(min([h_ * 2, w_ * 2]), dtype=tf.float32)
+        diff = math_ops.log(s_)
+        if min_shape > 1: diff = diff - math_ops.log(tf.cast(min_shape, dtype=tf.float32))
+        max_n_octaves = int(tf.round(diff / math_ops.log(2.0)) + 1)
+
+        if self.n_octaves is not None and max_n_octaves > self.n_octaves: max_n_octaves = self.n_octaves
+        self.n_octaves = max_n_octaves
+        return inputs, kernels
+
+    def __pyramid_kernels(self) -> list[tf.Tensor]:
         delta_sigma = (self.sigma ** 2) - ((2 * self.assume_blur_sigma) ** 2)
         delta_sigma = math_ops.sqrt(tf.maximum(delta_sigma, 0.64))
 
@@ -139,61 +156,133 @@ class SIFT:
             s = math_ops.sqrt((K * s_prev) ** 2 - s_prev ** 2)
             kernel_ = gaussian_kernel(kernel_size=0, sigma=s)
             kernels.append(tf.expand_dims(tf.expand_dims(kernel_, axis=-1), axis=-1))
+        return kernels
 
-        min_shape = int(kernels[-1].get_shape()[0])
-        s_ = tf.cast(min([h_ * 2, w_ * 2]), dtype=tf.float32)
-        diff = math_ops.log(s_)
-        if min_shape > 1:
-            diff = diff - math_ops.log(tf.cast(min_shape, dtype=tf.float32))
-        max_n_octaves = int(tf.round(diff / math_ops.log(2.0)) + 1)
-        if self.n_octaves is not None and max_n_octaves > self.n_octaves:
-            max_n_octaves = self.n_octaves
-        self.n_octaves = max_n_octaves
+    def __assign_descriptors(self, descriptors: tf.Tensor, bins: tf.Tensor, magnitude: tf.Tensor) -> tf.Tensor:
+        N_bins, window_width = 8, 4
+        _, y, x, _ = tf.unstack(bins, 4, -1)
+        mask = tf.where((y > -1) & (y < window_width) & (x > -1) & (x < window_width), True, False)
+        magnitude = tf.boolean_mask(magnitude, mask)
 
-        return inputs, kernels
+        b, y, x, z = tf.unstack(tf.boolean_mask(bins, mask), 4, -1)
 
-    def __split_parallel_jobs(self, key_points: KeyPoints) -> list[tuple]:
-        scale_multiplier, window_width = 3, 4
-        out_tup = namedtuple('job', 'octave_id, index, points, angle, width, radius')
-        out = []
+        while tf.reduce_min(z) < 0:
+            z = tf.where(z < 0, z + N_bins, z)
+
+        while tf.reduce_max(z) >= N_bins:
+            z = tf.where(z >= N_bins, z - N_bins, z)
+
+        bin_floor = [b] + [tf.round(tf.floor(h)) for h in [y, x, z]]
+        bin_frac = [tf.reshape(h - hf, (-1,)) for h, hf in zip([y, x, z], bin_floor[1:])]
+
+        y, x, z = bin_frac
+
+        _C0 = magnitude * (1 - y)
+        _C1 = magnitude * y
+
+        # interpolation in x direction
+        _C00 = _C0 * (1 - x)
+        _C01 = _C0 * x
+
+        _C10 = _C1 * (1 - x)
+        _C11 = _C1 * x
+
+        # interpolation in z direction
+        _C000 = _C00 * (1 - z)
+        _C001 = _C00 * z
+        _C010 = _C01 * (1 - z)
+        _C011 = _C01 * z
+        _C100 = _C10 * (1 - z)
+        _C101 = _C10 * z
+        _C110 = _C11 * (1 - z)
+        _C111 = _C11 * z
+
+        b, y, x, z = [tf.cast(c, tf.int32) for c in bin_floor]
+        descriptors = tf.tensor_scatter_nd_add(descriptors, tf.stack((b, y + 1, x + 1, z), -1), _C000)
+        descriptors = tf.tensor_scatter_nd_add(descriptors, tf.stack((b, y + 1, x + 1, (z + 1) % N_bins), -1), _C001)
+
+        descriptors = tf.tensor_scatter_nd_add(descriptors, tf.stack((b, y + 1, x + 2, z), -1), _C010)
+        descriptors = tf.tensor_scatter_nd_add(descriptors, tf.stack((b, y + 1, x + 2, (z + 1) % N_bins), -1), _C011)
+
+        descriptors = tf.tensor_scatter_nd_add(descriptors, tf.stack((b, y + 2, x + 1, z), -1), _C100)
+        descriptors = tf.tensor_scatter_nd_add(descriptors, tf.stack((b, y + 2, x + 1, (z + 1) % N_bins), -1), _C101)
+
+        descriptors = tf.tensor_scatter_nd_add(descriptors, tf.stack((b, y + 2, x + 2, z), -1), _C110)
+        descriptors = tf.tensor_scatter_nd_add(descriptors, tf.stack((b, y + 2, x + 2, (z + 1) % N_bins), -1), _C111)
+
+        return descriptors
+
+    def __descriptors_per_octave(self, octave: Octave, key_points: KeyPoints) -> tf.Tensor:
+        scale_multiplier, window_width, N_bins, descriptor_max_value = 3, 4, 8, 0.2
+        bins_per_degree = N_bins / 360.
+        weight_multiplier = -1.0 / (0.5 * window_width * window_width)
+        descriptors = tf.zeros((key_points.shape[0], window_width + 2, window_width + 2, N_bins), tf.float32)
+
         key_points = key_points.to_image_size()
         unpack_oct = key_points.unpack_octave()
-
-        parallel_octaves = tf.unique(tf.squeeze(unpack_oct.octave))
 
         scale_ = tf.pad(tf.repeat(unpack_oct.scale, 2, axis=1), tf.constant([[0, 0], [1, 0]]), constant_values=1.0)
         points = tf.round(tf.concat((key_points.pt * scale_, unpack_oct.layer), -1))
         histogram_width = scale_multiplier * 0.5 * unpack_oct.scale * key_points.size
         radius = tf.round(histogram_width * math_ops.sqrt(2.0) * (window_width + 1.0) * 0.5)
 
-        wrap = tf.concat(
-            (
-                tf.reshape(tf.range(key_points.shape[0], dtype=tf.float32), (-1, 1)),
-                points, key_points.angle, radius, histogram_width
-            ), -1
+        _, y, x, _ = tf.split(points, [1] * 4, -1)
+        radius = math_ops.minimum(
+            math_ops.minimum(octave.shape[1] - 3 - y, octave.shape[2] - 3 - x),
+            math_ops.minimum(math_ops.minimum(y, x), radius)
         )
-        wrap = tf.dynamic_partition(wrap, parallel_octaves.idx, parallel_octaves.y.get_shape()[0])
+        radius = tf.reshape(radius, (-1,))
+        parallel = tf.unique(radius)
 
-        for wrap_i, oc_id in zip(wrap, parallel_octaves.y):
-            index, points_i, angle_i, radius_i, width_i = tf.split(wrap_i, [1, 4, 1, 1, 1], -1)
-            _, y, x, _ = tf.split(points_i, [1] * 4, -1)
-            radius_i = math_ops.minimum(
-                math_ops.minimum(self.octave_pyramid[int(oc_id)].shape[1] - 3 - y,
-                                 self.octave_pyramid[int(oc_id)].shape[2] - 3 - x),
-                math_ops.minimum(math_ops.minimum(y, x), radius_i)
-            )
-            radius_i = tf.reshape(radius_i, (-1,))
-            parallel = tf.unique(radius_i)
-            wrap_i = tf.concat((index, points_i, angle_i, width_i), -1)
-            wrap_i = tf.dynamic_partition(wrap_i, parallel.idx, parallel.y.get_shape()[0])
+        indexes = tf.dynamic_partition(tf.reshape(tf.range(key_points.shape[0], dtype=tf.int32), (-1, 1)),
+                                       parallel.idx, tf.reduce_max(parallel.idx) + 1)
 
-            for wrap_ij, r in zip(wrap_i, parallel.y):
-                if r == 0: continue
-                index_j, points_ij, angle_ij, width_ij = tf.split(wrap_ij, [1, 4, 1, 1], -1)
-                out.append(out_tup(int(oc_id), tf.cast(index_j, tf.int32), points_ij, angle_ij, width_ij, int(r)))
-        return out
+        wrap = tf.concat((points, key_points.angle, histogram_width), -1)
+        wrap = tf.dynamic_partition(wrap, parallel.idx, parallel.y.get_shape()[0])
+
+        M = octave.magnitude
+        T = octave.orientation % 360.0
+
+        for index, wrap_i, r in zip(indexes, wrap, parallel.y):
+            points, angle, width = tf.split(wrap_i, [4, 1, 1], -1)
+            angle = 360.0 - angle
+            n = points.get_shape()[0]
+            cos = math_ops.cos((PI / 180) * angle)
+            sin = math_ops.sin((PI / 180) * angle)
+
+            neighbor = make_neighborhood2D(tf.constant([[0, 0, 0, 0]], dtype=tf.int64), con=(r * 2) + 1)
+            block = tf.expand_dims(tf.cast(points, tf.int64), axis=1) + neighbor
+
+            neighbor = tf.cast(tf.repeat(tf.split(neighbor, [1, 2, 1], -1)[1], n, 0), tf.float32)
+            y, x = tf.unstack(neighbor, 2, -1)
+            b = tf.cast(tf.ones(y.get_shape(), dtype=tf.int32) * index, tf.float32)
+
+            rotate = [((x * sin) + (y * cos)) / width, ((x * cos) - (y * sin)) / width]
+            weight = tf.reshape(math_ops.exp(weight_multiplier * (rotate[0] ** 2 + rotate[1] ** 2)), (-1,))
+
+            magnitude = tf.gather_nd(M, tf.reshape(block, (-1, 4))) * weight
+            orientation = tf.reshape(tf.gather_nd(T, tf.reshape(block, (-1, 4))), (n, -1))
+            orientation = ((orientation - angle) * bins_per_degree)
+
+            hist_bin = [b] + [rot + 0.5 * window_width - 0.5 for rot in rotate] + [orientation]
+            hist_bin = tf.reshape(tf.stack(hist_bin, -1), (-1, 4))
+
+            descriptors = self.__assign_descriptors(descriptors, hist_bin, magnitude)
+
+        descriptors = tf.slice(descriptors, [0, 1, 1, 0], [key_points.shape[0], window_width, window_width, N_bins])
+        descriptors = tf.reshape(descriptors, (key_points.shape[0], -1))
+
+        threshold = tf.norm(descriptors, ord=2, axis=1, keepdims=True) * descriptor_max_value
+        threshold = tf.repeat(threshold, N_bins * window_width * window_width, 1)
+        descriptors = tf.where(descriptors > threshold, threshold, descriptors)
+        descriptors = descriptors / tf.maximum(tf.norm(descriptors, ord=2, axis=1, keepdims=True), 1e-7)
+        descriptors = tf.round(descriptors * 512)
+        descriptors = tf.maximum(descriptors, 0)
+        descriptors = tf.minimum(descriptors, 255)
+        return descriptors
 
     def localize_extrema(self, octave: Octave) -> KeyPoints:
+        if not isinstance(octave, Octave): raise ValueError('octave need to by of type "Octave"')
         dim = octave.shape[-1]
         con, extrema_offset, contrast_threshold, eigen_ration = 3, 0.5, 0.03, 10
         octave_index = octave.index
@@ -334,6 +423,9 @@ class SIFT:
         return key_points
 
     def orientation_assignment(self, octave: Octave, key_points: KeyPoints) -> KeyPoints:
+        if not isinstance(octave, Octave): raise ValueError('octave need to by of type "Octave"')
+        if not isinstance(key_points, KeyPoints): raise ValueError('key_points need to by of type "KeyPoints"')
+
         orientation_N_bins, scale_factor, radius_factor = 36, 1.5, 3
         histogram = tf.zeros((key_points.shape[0], orientation_N_bins), dtype=tf.float32)
 
@@ -438,128 +530,44 @@ class SIFT:
         key_points.relies_scale_index()
         return key_points
 
-    def assign_descriptors(self, descriptors: tf.Tensor, bins: tf.Tensor, magnitude: tf.Tensor) -> tf.Tensor:
-        N_bins, window_width = 8, 4
-        _, y, x, _ = tf.unstack(bins, 4, -1)
-        mask = tf.where((y > -1) & (y < window_width) & (x > -1) & (x < window_width), True, False)
-        magnitude = tf.boolean_mask(magnitude, mask)
-
-        b, y, x, z = tf.unstack(tf.boolean_mask(bins, mask), 4, -1)
-
-        while tf.reduce_min(z) < 0:
-            z = tf.where(z < 0, z + N_bins, z)
-
-        while tf.reduce_max(z) >= N_bins:
-            z = tf.where(z >= N_bins, z - N_bins, z)
-
-        bin_floor = [b] + [tf.round(tf.floor(h)) for h in [y, x, z]]
-        bin_frac = [tf.reshape(h - hf, (-1,)) for h, hf in zip([y, x, z], bin_floor[1:])]
-
-        y, x, z = bin_frac
-
-        _C0 = magnitude * (1 - y)
-        _C1 = magnitude * y
-
-        # interpolation in x direction
-        _C00 = _C0 * (1 - x)
-        _C01 = _C0 * x
-
-        _C10 = _C1 * (1 - x)
-        _C11 = _C1 * x
-
-        # interpolation in z direction
-        _C000 = _C00 * (1 - z)
-        _C001 = _C00 * z
-        _C010 = _C01 * (1 - z)
-        _C011 = _C01 * z
-        _C100 = _C10 * (1 - z)
-        _C101 = _C10 * z
-        _C110 = _C11 * (1 - z)
-        _C111 = _C11 * z
-
-        b, y, x, z = [tf.cast(c, tf.int32) for c in bin_floor]
-        descriptors = tf.tensor_scatter_nd_add(descriptors, tf.stack((b, y + 1, x + 1, z), -1), _C000)
-        descriptors = tf.tensor_scatter_nd_add(descriptors, tf.stack((b, y + 1, x + 1, (z + 1) % N_bins), -1), _C001)
-
-        descriptors = tf.tensor_scatter_nd_add(descriptors, tf.stack((b, y + 1, x + 2, z), -1), _C010)
-        descriptors = tf.tensor_scatter_nd_add(descriptors, tf.stack((b, y + 1, x + 2, (z + 1) % N_bins), -1), _C011)
-
-        descriptors = tf.tensor_scatter_nd_add(descriptors, tf.stack((b, y + 2, x + 1, z), -1), _C100)
-        descriptors = tf.tensor_scatter_nd_add(descriptors, tf.stack((b, y + 2, x + 1, (z + 1) % N_bins), -1), _C101)
-
-        descriptors = tf.tensor_scatter_nd_add(descriptors, tf.stack((b, y + 2, x + 2, z), -1), _C110)
-        descriptors = tf.tensor_scatter_nd_add(descriptors, tf.stack((b, y + 2, x + 2, (z + 1) % N_bins), -1), _C111)
-
-        return descriptors
-
     def write_descriptors(self, key_points: KeyPoints) -> tf.Tensor:
-        scale_multiplier, window_width, N_bins, descriptor_max_value = 3, 4, 8, 0.2
-        bins_per_degree = N_bins / 360.
-        weight_multiplier = -1.0 / (0.5 * window_width * window_width)
-        descriptors = tf.zeros((key_points.shape[0], window_width + 2, window_width + 2, N_bins), tf.float32)
-        parallel = self.__split_parallel_jobs(key_points)
+        if not isinstance(key_points, KeyPoints): raise ValueError('key_points need to by of type "KeyPoints"')
+        unpack_oct = key_points.unpack_octave()
+        parallel = tf.unique(tf.squeeze(unpack_oct.octave))
 
-        M = self.octave_pyramid[0].magnitude
-        T = self.octave_pyramid[0].orientation
-        prev_oc = 0
+        if parallel.y.get_shape()[0] == 1:
+            return self.__descriptors_per_octave(self.octave_pyramid[int(parallel.y)], key_points)
 
-        for job in parallel:
-            octave_id, index, points, angle, width, radius = job
-            angle = 360.0 - angle
-            n = points.get_shape()[0]
-            cos = math_ops.cos((PI / 180) * angle)
-            sin = math_ops.sin((PI / 180) * angle)
-            if prev_oc != octave_id:
-                M = self.octave_pyramid[octave_id].magnitude
-                T = self.octave_pyramid[octave_id].orientation
-                prev_oc = octave_id
+        indexes = tf.dynamic_partition(tf.reshape(tf.range(key_points.shape[0], dtype=tf.int32), (-1, 1)),
+                                       parallel.idx, tf.reduce_max(parallel.idx) + 1)
 
-            neighbor = make_neighborhood2D(tf.constant([[0, 0, 0, 0]], dtype=tf.int64), con=(radius * 2) + 1)
-            block = tf.expand_dims(tf.cast(points, tf.int64), axis=1) + neighbor
+        split_by_oc = key_points.partition_by_index(parallel.idx)
 
-            neighbor = tf.cast(tf.repeat(tf.split(neighbor, [1, 2, 1], -1)[1], n, 0), tf.float32)
-            y, x = tf.unstack(neighbor, 2, -1)
-            b = tf.cast(tf.ones(y.get_shape(), dtype=tf.int32) * index, tf.float32)
+        condition_indices = []
+        partitioned_data = []
 
-            rotate = [((x * sin) + (y * cos)) / width, ((x * cos) - (y * sin)) / width]
-            weight = tf.reshape(math_ops.exp(weight_multiplier * (rotate[0] ** 2 + rotate[1] ** 2)), (-1,))
+        for keys, index, oc_id in zip(split_by_oc, indexes, parallel.y):
+            oc_desc = self.__descriptors_per_octave(self.octave_pyramid[int(oc_id)], keys)
+            condition_indices.append(tf.squeeze(index))
+            partitioned_data.append(oc_desc)
 
-            magnitude = tf.gather_nd(M, tf.reshape(block, (-1, 4))) * weight
-            orientation = tf.reshape(tf.gather_nd(T, tf.reshape(block, (-1, 4))), (n, -1)) % 360.0
-            orientation = ((orientation - angle) * bins_per_degree)
-
-            hist_bin = [b] + [rot + 0.5 * window_width - 0.5 for rot in rotate] + [orientation]
-            hist_bin = tf.reshape(tf.stack(hist_bin, -1), (-1, 4))
-
-            descriptors = self.assign_descriptors(descriptors, hist_bin, magnitude)
-
-        descriptors = tf.slice(descriptors, [0, 1, 1, 0], [key_points.shape[0], window_width, window_width, N_bins])
-        descriptors = tf.reshape(descriptors, (key_points.shape[0], -1))
-
-        threshold = tf.norm(descriptors, ord=2, axis=1, keepdims=True) * descriptor_max_value
-        threshold = tf.repeat(threshold, N_bins * window_width * window_width, 1)
-        descriptors = tf.where(descriptors > threshold, threshold, descriptors)
-        descriptors = descriptors / tf.maximum(tf.norm(descriptors, ord=2, axis=1, keepdims=True), 1e-7)
-        descriptors = tf.round(descriptors * 512)
-        descriptors = tf.maximum(descriptors, 0)
-        descriptors = tf.minimum(descriptors, 255)
+        descriptors = tf.dynamic_stitch(condition_indices, partitioned_data)
         return descriptors
 
-    def keypoints_with_descriptors(self, inputs: tf.Tensor) -> tuple[KeyPoints, tf.Tensor]:
-        def conv_with_pad(x, h):
+    def build_pyramid(self, I: tf.Tensor):
+        def conv_with_pad(x: tf.Tensor, h: tf.Tensor) -> tf.Tensor:
             k_ = h.get_shape()[0] // 2
             x = tf.pad(x, tf.constant([[0, 0], [k_, k_], [k_, k_], [0, 0]], tf.int32), 'SYMMETRIC')
             return tf.nn.convolution(x, h, padding='VALID')
 
-        inputs, kernels = self.__init_graph(inputs)
-        _, h_, w_, _ = inputs.get_shape()
+        I, kernels = self.__init_graph(I)
+        self.octave_pyramid = []
+        _, h_, w_, _ = I.get_shape()
 
-        I = image_ops.resize(inputs, size=[h_ * 2, w_ * 2], method='bilinear')
+        I = image_ops.resize(I, size=[h_ * 2, w_ * 2], method='bilinear')
         I = conv_with_pad(I, kernels[0])
 
         size_ = [h_, w_]
-        key_points = KeyPoints()
-        key_points.relies_scale_index()
 
         for oc_id in range(self.n_octaves):
             oc_cap = [I]
@@ -568,18 +576,21 @@ class SIFT:
                 oc_cap.append(I)
             if oc_id < self.n_octaves - 1:
                 I = image_ops.resize(oc_cap[-3], size=size_, method='nearest')
-                size_[0] //= 2
-                size_[1] //= 2
+                size_ = [size_[0] // 2, size_[1] // 2]
 
             gss = tf.concat(oc_cap, -1)
             oc = Octave(oc_id, gss)
-
             self.octave_pyramid.append(oc)
 
+    def keypoints_with_descriptors(self, inputs: tf.Tensor) -> tuple[KeyPoints, tf.Tensor]:
+        self.build_pyramid(inputs)
+
+        key_points = KeyPoints()
+        key_points.relies_scale_index()
+
+        for oc in self.octave_pyramid:
             oc_kp = self.localize_extrema(oc)
-
             if oc_kp.shape[0] == 0: continue
-
             oc_kp = self.orientation_assignment(oc, oc_kp)
             key_points += oc_kp
 
@@ -589,8 +600,8 @@ class SIFT:
 
 
 if __name__ == '__main__':
-    image1 = load_image('tmplt.jpeg')
-    image2 = load_image('scan.jpeg')
+    image1 = load_image('box.png')
+    image2 = load_image('box_in_scene.png')
 
     alg = SIFT()
 
@@ -598,4 +609,4 @@ if __name__ == '__main__':
     # show_key_points(kp1.to_image_size(), image1)
     kp2, desc2 = alg.keypoints_with_descriptors(image2)
 
-    templet_matching(image1, image2, kp1, kp2, desc1, desc2)
+    # templet_matching(image1, image2, kp1, kp2, desc1, desc2)

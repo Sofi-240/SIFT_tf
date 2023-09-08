@@ -15,7 +15,7 @@ class Octave:
         self.__shape = gss.get_shape().as_list()
         self.index = index
         self.gss = gss
-        self.dx, self.dy, self.magnitude, self.orientation = compute_grad_mag_ori(gss)
+        self.magnitude, self.orientation = compute_mag_ori(gss)
 
     @property
     def shape(self):
@@ -135,10 +135,18 @@ class KeyPoints:
         octave = octave + 1
         return unpacked_octave(tf.cast(octave, dtype=tf.float32), tf.cast(layer, dtype=tf.float32), scale)
 
-    def unpack_batch(self) -> list[KT]:
+    def partition_by_batch(self) -> list[KT]:
         if self.shape[0] == 0: return None
         part = tf.reshape(tf.cast(tf.split(self.pt, [1, 2], -1)[0], tf.int32), (-1,))
         part = tf.dynamic_partition(self.as_array(), part, tf.reduce_max(part) + 1)
+        out = [self.from_array(p, inplace=False) for p in part]
+        return out
+
+    def partition_by_index(self, partition_index: tf.Tensor) -> list[KT]:
+        if self.shape[0] == 0: return None
+        if partition_index.get_shape()[0] != self.shape[0]:
+            raise ValueError('partition_index shape not equal to key points shape')
+        part = tf.dynamic_partition(self.as_array(), partition_index, tf.reduce_max(partition_index) + 1)
         out = [self.from_array(p, inplace=False) for p in part]
         return out
 
@@ -392,9 +400,9 @@ def compute_hessian_3D(
     return hessian_mat
 
 
-def compute_grad_mag_ori(
+def compute_mag_ori(
         gss: tf.Tensor
-) -> tuple[tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor]:
+) -> tuple[tf.Tensor, tf.Tensor]:
     kx = tf.constant([[0.0, 0.0, 0.0], [-1.0, 0.0, 1.0], [0.0, 0.0, 0.0]], shape=(3, 3, 1, 1, 1), dtype=tf.float32)
     ky = tf.constant([[0.0, -1.0, 0.0], [0.0, 0.0, 0.0], [0.0, 1.0, 0.0]], shape=(3, 3, 1, 1, 1), dtype=tf.float32)
     gradient_kernel = tf.concat((kx, ky), axis=-1)
@@ -405,4 +413,4 @@ def compute_grad_mag_ori(
     magnitude = tf.math.sqrt(dx * dx + dy * dy)
     orientation = tf.math.atan2(dy, dx) * (180.0 / PI)
 
-    return dx, dy, magnitude, orientation
+    return magnitude, orientation
