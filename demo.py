@@ -8,14 +8,14 @@ if __name__ == '__main__':
     alg = SIFT()
 
     kp1, desc1 = alg.keypoints_with_descriptors(image1)
-    # show_key_points(kp1, image1)
+    show_key_points(kp1, image1)
 
-    image2 = load_image('box_in_scene.png')
-    kp2, desc2 = alg.keypoints_with_descriptors(image2)
+    # image2 = load_image('box_in_scene.png')
+    # kp2, desc2 = alg.keypoints_with_descriptors(image2)
 
     # # Run this only with GPU if number of points is large
-    src_pt, dst_pt = templet_matching_TF(kp1, kp2, desc1, desc2)
-    out = plot_matches_TF(image1, image2, src_pt, dst_pt)
+    # src_pt, dst_pt = templet_matching_TF(kp1, kp2, desc1, desc2)
+    # out = plot_matches_TF(image1, image2, src_pt, dst_pt)
 
     # src_pt, dst_pt = templet_matching_CV2(kp1, kp2, desc1, desc2)
     # out = plot_matches_CV2(image1, image2, src_pt, dst_pt)

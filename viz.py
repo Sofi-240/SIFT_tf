@@ -2,7 +2,7 @@ from matplotlib import pyplot as plt
 import matplotlib
 import tensorflow as tf
 import numpy as np
-from utils import KT
+from utils import KeyPoints
 from typing import Union
 import cv2
 
@@ -41,10 +41,10 @@ def show_images(
 
 
 def show_key_points(
-        key_points: KT,
+        key_points: KeyPoints,
         img: tf.Tensor
 ):
-    if not isinstance(key_points, type(KT)): raise TypeError('Key points need to be of type "KeyPoints"')
+    if not isinstance(key_points, KeyPoints): raise TypeError('Key points need to be of type "KeyPoints"')
     key_points = key_points.to_image_size()
 
     if key_points.n_batches() > 1: raise ValueError("number of batches in the key points > 1")
@@ -193,8 +193,8 @@ def plot_matches_TF(
 def plot_matches_CV2(
         scr_img: tf.Tensor,
         dst_img: tf.Tensor,
-        src_pt: KT,
-        dst_pt: KT
+        src_pt: tf.Tensor,
+        dst_pt: tf.Tensor
 ) -> tf.Tensor:
     if not isinstance(scr_img, tf.Tensor) or not isinstance(dst_img, tf.Tensor):
         raise TypeError('descriptors need to be of type "Tensor"')
