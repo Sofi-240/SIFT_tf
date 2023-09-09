@@ -1,22 +1,27 @@
 from typing import Union
 import tensorflow as tf
-from utils import PI, gaussian_kernel, compute_extrema3D, load_image, templet_matching_TF, templet_matching_CV2, \
-    make_neighborhood2D, compute_central_gradient3D, compute_hessian_3D, Octave, KeyPoints
+from utils import PI, gaussian_kernel, compute_extrema3D, make_neighborhood2D, compute_central_gradient3D, \
+    compute_hessian_3D, Octave, KeyPoints
 from tensorflow.python.keras import backend
-from viz import show_key_points, show_images, plot_matches_TF, plot_matches_CV2
 
 # https://www.cs.ubc.ca/~lowe/papers/ijcv04.pdf
 
 backend.set_floatx('float32')
 linalg_ops = tf.linalg
 math_ops = tf.math
-bitwise_ops = tf.bitwise
 image_ops = tf.image
 
 
 class SIFT:
-    def __init__(self, sigma: float = 1.6, assume_blur_sigma: float = 0.5, n_intervals: int = 3,
-                 n_octaves: Union[int, None] = None, border_width: int = 5, convergence_iter: int = 5):
+    def __init__(
+            self,
+            sigma: float = 1.6,
+            assume_blur_sigma: float = 0.5,
+            n_intervals: int = 3,
+            n_octaves: Union[int, None] = None,
+            border_width: int = 5,
+            convergence_iter: int = 5
+    ):
         self.sigma = sigma
         self.assume_blur_sigma = assume_blur_sigma
         self.n_intervals = n_intervals
@@ -24,8 +29,12 @@ class SIFT:
         self.border_width = border_width
         self.convergence_N = convergence_iter
         self.octave_pyramid: list[Octave] = []
+        self.templet_capture: Union[None, list[KeyPoints, tf.Tensor]] = None
 
-    def __init_graph(self, inputs: tf.Tensor) -> tuple[tf.Tensor, list[tf.Tensor]]:
+    def __init_graph(
+            self,
+            inputs: tf.Tensor
+    ) -> tuple[tf.Tensor, list[tf.Tensor]]:
         if not isinstance(inputs, tf.Tensor): raise ValueError('Input image need to be of type Tensor')
 
         _shape = inputs.get_shape().as_list()
@@ -47,7 +56,9 @@ class SIFT:
         self.n_octaves = max_n_octaves
         return inputs, kernels
 
-    def __pyramid_kernels(self) -> list[tf.Tensor]:
+    def __pyramid_kernels(
+            self
+    ) -> list[tf.Tensor]:
         delta_sigma = (self.sigma ** 2) - ((2 * self.assume_blur_sigma) ** 2)
         delta_sigma = math_ops.sqrt(tf.maximum(delta_sigma, 0.64))
 
@@ -67,7 +78,12 @@ class SIFT:
             kernels.append(tf.expand_dims(tf.expand_dims(kernel_, axis=-1), axis=-1))
         return kernels
 
-    def __assign_descriptors(self, descriptors: tf.Tensor, bins: tf.Tensor, magnitude: tf.Tensor) -> tf.Tensor:
+    def __assign_descriptors(
+            self,
+            descriptors: tf.Tensor,
+            bins: tf.Tensor,
+            magnitude: tf.Tensor
+    ) -> tf.Tensor:
         N_bins, window_width = 8, 4
         _, y, x, _ = tf.unstack(bins, 4, -1)
         mask = tf.where((y > -1) & (y < window_width) & (x > -1) & (x < window_width), True, False)
@@ -121,7 +137,11 @@ class SIFT:
 
         return descriptors
 
-    def __descriptors_per_octave(self, octave: Octave, key_points: KeyPoints) -> tf.Tensor:
+    def __descriptors_per_octave(
+            self,
+            octave: Octave,
+            key_points: KeyPoints
+    ) -> tf.Tensor:
         scale_multiplier, window_width, N_bins, descriptor_max_value = 3, 4, 8, 0.2
         bins_per_degree = N_bins / 360.
         weight_multiplier = -1.0 / (0.5 * window_width * window_width)
@@ -190,7 +210,10 @@ class SIFT:
         descriptors = tf.minimum(descriptors, 255)
         return descriptors
 
-    def localize_extrema(self, octave: Octave) -> KeyPoints:
+    def localize_extrema(
+            self,
+            octave: Octave
+    ) -> KeyPoints:
         if not isinstance(octave, Octave): raise ValueError('octave need to by of type "Octave"')
         dim = octave.shape[-1]
         con, extrema_offset, contrast_threshold, eigen_ration = 3, 0.5, 0.03, 10
@@ -331,7 +354,11 @@ class SIFT:
         )
         return key_points
 
-    def orientation_assignment(self, octave: Octave, key_points: KeyPoints) -> KeyPoints:
+    def orientation_assignment(
+            self,
+            octave: Octave,
+            key_points: KeyPoints
+    ) -> KeyPoints:
         if not isinstance(octave, Octave): raise ValueError('octave need to by of type "Octave"')
         if not isinstance(key_points, KeyPoints): raise ValueError('key_points need to by of type "KeyPoints"')
 
@@ -439,7 +466,10 @@ class SIFT:
         key_points.relies_scale_index()
         return key_points
 
-    def write_descriptors(self, key_points: KeyPoints) -> tf.Tensor:
+    def write_descriptors(
+            self,
+            key_points: KeyPoints
+    ) -> tf.Tensor:
         if not isinstance(key_points, KeyPoints): raise ValueError('key_points need to by of type "KeyPoints"')
         unpack_oct = key_points.unpack_octave()
         parallel = tf.unique(tf.squeeze(unpack_oct.octave))
@@ -463,7 +493,10 @@ class SIFT:
         descriptors = tf.dynamic_stitch(condition_indices, partitioned_data)
         return descriptors
 
-    def build_pyramid(self, I: tf.Tensor):
+    def build_pyramid(
+            self,
+            I: tf.Tensor
+    ):
         def conv_with_pad(x: tf.Tensor, h: tf.Tensor) -> tf.Tensor:
             k_ = h.get_shape()[0] // 2
             x = tf.pad(x, tf.constant([[0, 0], [k_, k_], [k_, k_], [0, 0]], tf.int32), 'SYMMETRIC')
@@ -491,7 +524,12 @@ class SIFT:
             oc = Octave(oc_id, gss)
             self.octave_pyramid.append(oc)
 
-    def keypoints_with_descriptors(self, inputs: tf.Tensor) -> tuple[KeyPoints, tf.Tensor]:
+    def keypoints_with_descriptors(
+            self,
+            inputs: tf.Tensor,
+            keep_as_templet: bool = False
+    ) -> tuple[KeyPoints, tf.Tensor]:
+        if keep_as_templet and self.templet_capture: raise Warning('prev templet will be removed')
         self.build_pyramid(inputs)
 
         key_points = KeyPoints()
@@ -505,22 +543,11 @@ class SIFT:
 
         descriptors = self.write_descriptors(key_points)
         self.octave_pyramid = []
+        if keep_as_templet:
+            self.templet_capture = [key_points, descriptors]
         return key_points, descriptors
 
-
-if __name__ == '__main__':
-    image1 = load_image('box.png')
-
-    alg = SIFT()
-
-    kp1, desc1 = alg.keypoints_with_descriptors(image1)
-    # show_key_points(kp1, image1)
-
-    image2 = load_image('box_in_scene.png')
-    kp2, desc2 = alg.keypoints_with_descriptors(image2)
-
-    src_pt, dst_pt = templet_matching_TF(kp1, kp2, desc1, desc2)
-    plot_matches_TF(image1, image2, src_pt, dst_pt)
-
-    src_pt, dst_pt = templet_matching_CV2(kp1, kp2, desc1, desc2)
-    plot_matches_CV2(image1, image2, src_pt, dst_pt)
+    def relies_templet(
+            self
+    ):
+        self.templet_capture = None

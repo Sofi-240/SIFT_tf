@@ -1,6 +1,7 @@
 import tensorflow as tf
 from typing import Union, TypeVar
 from collections import namedtuple
+import cv2
 
 PI = tf.cast(
     tf.math.angle(tf.constant(-1, dtype=tf.complex64)), tf.float32
@@ -11,21 +12,31 @@ unpacked_octave = namedtuple('unpacked_octave', 'octave, layer, scale')
 
 
 class Octave:
-    def __init__(self, index: int, gss: tf.Tensor):
+    def __init__(
+            self,
+            index: int,
+            gss: tf.Tensor
+    ):
         self.__shape = gss.get_shape().as_list()
         self.index = index
         self.gss = gss
         self.magnitude, self.orientation = compute_mag_ori(gss)
 
     @property
-    def shape(self):
+    def shape(self) -> list:
         return self.__shape
 
 
 class KeyPoints:
-    def __init__(self, pt: Union[None, tf.Tensor] = None, size: Union[None, tf.Tensor] = None,
-                 angle: Union[None, tf.Tensor] = None, octave: Union[None, tf.Tensor] = None,
-                 response: Union[None, tf.Tensor] = None, as_image_size: bool = False):
+    def __init__(
+            self,
+            pt: Union[None, tf.Tensor] = None,
+            size: Union[None, tf.Tensor] = None,
+            angle: Union[None, tf.Tensor] = None,
+            octave: Union[None, tf.Tensor] = None,
+            response: Union[None, tf.Tensor] = None,
+            as_image_size: bool = False
+    ):
         self.scale_index = None
         self.__shape = (0,)
         self.pt = tf.constant([[]], shape=(0, 3), dtype=tf.float32)
@@ -35,8 +46,12 @@ class KeyPoints:
         self.response = tf.constant([[]], shape=(0, 1), dtype=tf.float32)
         self.as_image_size = as_image_size
         if pt is not None: self.__constructor(pt, size, angle, octave, response)
+        self.__n_batch = None
 
-    def __add__(self, other: KT) -> KT:
+    def __add__(
+            self,
+            other: KT
+    ) -> KT:
         if not isinstance(other, KeyPoints): raise TypeError
         if self.as_image_size ^ other.as_image_size: raise ValueError('the as_image_size parameter not inconsistent')
         if (self.scale_index is None) ^ (other.scale_index is None):
@@ -47,7 +62,10 @@ class KeyPoints:
         ints = self.from_array(tf.concat((self.as_array(), other.as_array()), axis=0), inplace=False)
         return ints
 
-    def __iadd__(self, other: KT) -> KT:
+    def __iadd__(
+            self,
+            other: KT
+    ) -> KT:
         if not isinstance(other, KeyPoints): raise TypeError
         if self.as_image_size ^ other.as_image_size: raise ValueError('the as_image_size parameter not inconsistent')
         if (self.scale_index is None) ^ (other.scale_index is None):
@@ -58,7 +76,14 @@ class KeyPoints:
         self.from_array(tf.concat((self.as_array(), other.as_array()), axis=0), inplace=True)
         return self
 
-    def __constructor(self, pt, size, angle, octave, response):
+    def __constructor(
+            self,
+            pt,
+            size,
+            angle,
+            octave,
+            response
+    ):
         if not isinstance(pt, tf.Tensor): raise ValueError('All the fields need to be type of tf.Tensor')
         _shape = pt.get_shape().as_list()
         if len(_shape) > 2:
@@ -79,6 +104,7 @@ class KeyPoints:
         self.pt, self.size, self.angle, self.octave, self.response = valid
         self.scale_index = scale_index
         self.__shape = (_shape[0],)
+        self.__n_batch = None
 
     @property
     def shape(self) -> tuple:
@@ -90,7 +116,12 @@ class KeyPoints:
         _array += [self.size, self.angle, self.octave, self.response]
         return tf.concat(_array, axis=-1)
 
-    def from_array(self, array: tf.Tensor, inplace=False) -> Union[None, KT]:
+    def from_array(
+            self,
+            array:
+            tf.Tensor,
+            inplace=False
+    ) -> Union[None, KT]:
         _shape = array.get_shape().as_list()
         if len(_shape) != 2 or _shape[1] < 7: raise ValueError('array rank need to be 2 with size of (None, 7 or 8)')
         splits = [4] if _shape[1] == 8 else [3]
@@ -99,7 +130,10 @@ class KeyPoints:
         if not inplace: return KeyPoints(*split, as_image_size=self.as_image_size)
         self.__constructor(*split)
 
-    def to_image_size(self, inplace=False) -> Union[None, KT]:
+    def to_image_size(
+            self,
+            inplace=False
+    ) -> Union[None, KT]:
         if self.shape[0] == 0 or self.as_image_size: return self if not inplace else None
         pt_unpack = self.pt * tf.constant([1.0, 0.5, 0.5], dtype=tf.float32)
         size_unpack = self.size * 0.5
@@ -135,20 +169,34 @@ class KeyPoints:
         octave = octave + 1
         return unpacked_octave(tf.cast(octave, dtype=tf.float32), tf.cast(layer, dtype=tf.float32), scale)
 
-    def partition_by_batch(self) -> list[KT]:
+    def partition_by_batch(
+            self,
+            descriptors: Union[tf.Tensor, None] = None
+    ) -> tuple[list[KT], Union[tf.Tensor, None]]:
         if self.shape[0] == 0: return None
         part = tf.reshape(tf.cast(tf.split(self.pt, [1, 2], -1)[0], tf.int32), (-1,))
+        if descriptors is not None:
+            descriptors = tf.dynamic_partition(descriptors, part, tf.reduce_max(part) + 1)
         part = tf.dynamic_partition(self.as_array(), part, tf.reduce_max(part) + 1)
         out = [self.from_array(p, inplace=False) for p in part]
-        return out
+        return out, descriptors
 
-    def partition_by_index(self, partition_index: tf.Tensor) -> list[KT]:
+    def partition_by_index(
+            self,
+            partition_index: tf.Tensor
+    ) -> list[KT]:
         if self.shape[0] == 0: return None
         if partition_index.get_shape()[0] != self.shape[0]:
             raise ValueError('partition_index shape not equal to key points shape')
         part = tf.dynamic_partition(self.as_array(), partition_index, tf.reduce_max(partition_index) + 1)
         out = [self.from_array(p, inplace=False) for p in part]
         return out
+
+    def n_batches(self) -> int:
+        if self.__n_batch is not None: return self.__n_batch
+        batch = tf.split(self.pt, [1, 2], -1)[0]
+        self.__n_batch = int(tf.reduce_max(batch)) - int(tf.reduce_min(batch)) + 1
+        return self.__n_batch
 
 
 def gaussian_kernel(
@@ -183,6 +231,7 @@ def make_neighborhood2D(
         con: int = 3,
         origin_shape: Union[None, tuple, list, tf.TensorShape] = None
 ) -> tf.Tensor:
+    if not isinstance(init_cords, tf.Tensor): raise TypeError("cords need to be of type Tensor")
     B, ndim = init_cords.get_shape()
     con = int(con)
     assert ndim == 4
@@ -226,7 +275,8 @@ def compute_extrema3D(
         border_width: Union[tf.Tensor, tuple, list, None] = None,
         epsilon: Union[tf.Tensor, float] = 1e-07
 ) -> tf.Tensor:
-    _shape = tf.shape(X)
+    if not isinstance(X, tf.Tensor): raise TypeError("X need to be of type Tensor")
+    _shape = X.get_shape().as_list()
     _n_dims = len(_shape)
     if _n_dims != 4:
         raise ValueError(
@@ -297,7 +347,8 @@ def compute_extrema3D(
 def compute_central_gradient3D(
         X: tf.Tensor
 ) -> tf.Tensor:
-    _shape = tf.shape(X)
+    if not isinstance(X, tf.Tensor): raise TypeError("X need to be of type Tensor")
+    _shape = X.get_shape().as_list()
     _n_dims = len(_shape)
     if _n_dims != 4:
         raise ValueError(
@@ -331,7 +382,8 @@ def compute_central_gradient3D(
 def compute_hessian_3D(
         X: tf.Tensor
 ) -> tf.Tensor:
-    _shape = tf.shape(X)
+    if not isinstance(X, tf.Tensor): raise TypeError("X need to be of type Tensor")
+    _shape = X.get_shape().as_list()
     _n_dims = len(_shape)
     if _n_dims != 4:
         raise ValueError(
@@ -403,6 +455,7 @@ def compute_hessian_3D(
 def compute_mag_ori(
         gss: tf.Tensor
 ) -> tuple[tf.Tensor, tf.Tensor]:
+    if not isinstance(gss, tf.Tensor): raise TypeError("gss need to be of type Tensor")
     kx = tf.constant([[0.0, 0.0, 0.0], [-1.0, 0.0, 1.0], [0.0, 0.0, 0.0]], shape=(3, 3, 1, 1, 1), dtype=tf.float32)
     ky = tf.constant([[0.0, -1.0, 0.0], [0.0, 0.0, 0.0], [0.0, 1.0, 0.0]], shape=(3, 3, 1, 1, 1), dtype=tf.float32)
     gradient_kernel = tf.concat((kx, ky), axis=-1)
@@ -417,9 +470,10 @@ def compute_mag_ori(
 
 
 def load_image(
-        name: str
+        name: str,
+        color_mode: str = 'grayscale'
 ) -> tf.Tensor:
-    im = tf.keras.utils.load_img(name, color_mode='grayscale')
+    im = tf.keras.utils.load_img(name, color_mode=color_mode)
     im = tf.convert_to_tensor(tf.keras.utils.img_to_array(im), dtype=tf.float32)
     return im[tf.newaxis, ...]
 
@@ -429,7 +483,22 @@ def templet_matching_TF(
         dst_kp: KT,
         scr_dsc: tf.Tensor,
         dst_dsc: tf.Tensor
-) -> tuple[tf.Tensor, tf.Tensor]:
+) -> tuple[Union[list[tf.Tensor], tf.Tensor], Union[list[tf.Tensor], tf.Tensor]]:
+    if not isinstance(scr_kp, KeyPoints) or not isinstance(dst_kp, KeyPoints):
+        raise TypeError('Key points need to be of type "KeyPoints"')
+    if not isinstance(scr_dsc, tf.Tensor) or not isinstance(dst_dsc, tf.Tensor):
+        raise TypeError('descriptors need to be of type "Tensor"')
+    if scr_kp.n_batches() > 1: raise ValueError("number of batches in the templet key points > 1")
+    if dst_kp.n_batches() > 1:
+        dst_kp_, dst_dsc_ = dst_kp.partition_by_batch(descriptors=dst_dsc)
+        out_src_pt = []
+        out_dst_pt = []
+        for kpt, dsc in zip(dst_kp_, dst_dsc_):
+            src_pt_, dst_pt_ = templet_matching_TF(scr_kp, kpt, scr_dsc, dsc)
+            out_src_pt.append(src_pt_)
+            out_dst_pt.append(dst_pt_)
+        return out_src_pt, out_dst_pt
+
     diff = tf.transpose(tf.expand_dims(scr_dsc, 0), (0, 2, 1)) - tf.expand_dims(dst_dsc, -1)
     diff = tf.norm(diff, ord='euclidean', axis=1)
     diff = tf.transpose(diff, (1, 0))
@@ -454,7 +523,20 @@ def templet_matching_CV2(
         scr_dsc: tf.Tensor,
         dst_dsc: tf.Tensor
 ) -> tuple[tf.Tensor, tf.Tensor]:
-    import cv2
+    if not isinstance(scr_kp, KeyPoints) or not isinstance(dst_kp, KeyPoints):
+        raise TypeError('Key points need to be of type "KeyPoints"')
+    if not isinstance(scr_dsc, tf.Tensor) or not isinstance(dst_dsc, tf.Tensor):
+        raise TypeError('descriptors need to be of type "Tensor"')
+    if scr_kp.n_batches() > 1: raise ValueError("number of batches in the templet key points > 1")
+    if dst_kp.n_batches() > 1:
+        dst_kp_, dst_dsc_ = dst_kp.partition_by_batch(descriptors=dst_dsc)
+        out_src_pt = []
+        out_dst_pt = []
+        for kpt, dsc in zip(dst_kp_, dst_dsc_):
+            src_pt_, dst_pt_ = templet_matching_CV2(scr_kp, kpt, scr_dsc, dsc)
+            out_src_pt.append(src_pt_)
+            out_dst_pt.append(dst_pt_)
+        return out_src_pt, out_dst_pt
 
     flann = cv2.FlannBasedMatcher(dict(algorithm=0, trees=5), dict(checks=50))
 
