@@ -27,7 +27,7 @@ class KeyPoints:
                  angle: Union[None, tf.Tensor] = None, octave: Union[None, tf.Tensor] = None,
                  response: Union[None, tf.Tensor] = None, as_image_size: bool = False):
         self.scale_index = None
-        self.__shape = (0, )
+        self.__shape = (0,)
         self.pt = tf.constant([[]], shape=(0, 3), dtype=tf.float32)
         self.size = tf.constant([[]], shape=(0, 1), dtype=tf.float32)
         self.angle = tf.constant([[]], shape=(0, 1), dtype=tf.float32)
@@ -78,7 +78,7 @@ class KeyPoints:
             valid.append(f)
         self.pt, self.size, self.angle, self.octave, self.response = valid
         self.scale_index = scale_index
-        self.__shape = (_shape[0], )
+        self.__shape = (_shape[0],)
 
     @property
     def shape(self) -> tuple:
@@ -125,7 +125,7 @@ class KeyPoints:
         octave = octave_unpack & 255
         octave = (octave ^ 255) - 1
 
-        layer = tf.bitwise.left_shift(octave_unpack, 8)
+        layer = tf.bitwise.right_shift(octave_unpack, 8)
         layer = layer & 255
 
         scale = tf.where(
@@ -414,3 +414,63 @@ def compute_mag_ori(
     orientation = tf.math.atan2(dy, dx) * (180.0 / PI)
 
     return magnitude, orientation
+
+
+def load_image(
+        name: str
+) -> tf.Tensor:
+    im = tf.keras.utils.load_img(name, color_mode='grayscale')
+    im = tf.convert_to_tensor(tf.keras.utils.img_to_array(im), dtype=tf.float32)
+    return im[tf.newaxis, ...]
+
+
+def templet_matching_TF(
+        scr_kp: KT,
+        dst_kp: KT,
+        scr_dsc: tf.Tensor,
+        dst_dsc: tf.Tensor
+) -> tuple[tf.Tensor, tf.Tensor]:
+    diff = tf.transpose(tf.expand_dims(scr_dsc, 0), (0, 2, 1)) - tf.expand_dims(dst_dsc, -1)
+    diff = tf.norm(diff, ord='euclidean', axis=1)
+    diff = tf.transpose(diff, (1, 0))
+
+    _, indices = tf.math.top_k(-diff, k=2)
+    values = tf.gather(diff, indices, batch_dims=-1)
+
+    m_dist, n_dist = tf.unstack(values, 2, -1)
+    mask = tf.where(m_dist < 0.7 * n_dist, True, False)
+
+    des_index = tf.boolean_mask(tf.unstack(indices, 2, -1)[0], mask)
+    scr_index = tf.cast(tf.squeeze(tf.where(mask)), tf.int32)
+
+    src_pt = tf.gather(scr_kp.to_image_size().pt, scr_index)
+    dst_pt = tf.gather(dst_kp.to_image_size().pt, des_index)
+    return src_pt, dst_pt
+
+
+def templet_matching_CV2(
+        scr_kp: KT,
+        dst_kp: KT,
+        scr_dsc: tf.Tensor,
+        dst_dsc: tf.Tensor
+) -> tuple[tf.Tensor, tf.Tensor]:
+    import cv2
+
+    flann = cv2.FlannBasedMatcher(dict(algorithm=0, trees=5), dict(checks=50))
+
+    scr_dsc = scr_dsc.numpy()
+    dst_dsc = dst_dsc.numpy()
+
+    matches = flann.knnMatch(scr_dsc, dst_dsc, k=2)
+
+    good = []
+    for m, n in matches:
+        if m.distance < 0.7 * n.distance:
+            good.append(m)
+
+    src_index = [m.queryIdx for m in good]
+    dst_index = [m.trainIdx for m in good]
+
+    src_pt = tf.gather(scr_kp.to_image_size().pt, tf.constant(src_index, dtype=tf.int32))
+    dst_pt = tf.gather(dst_kp.to_image_size().pt, tf.constant(dst_index, dtype=tf.int32))
+    return src_pt, dst_pt

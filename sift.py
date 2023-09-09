@@ -1,9 +1,9 @@
 from typing import Union
 import tensorflow as tf
-from utils import PI, gaussian_kernel, compute_extrema3D, \
+from utils import PI, gaussian_kernel, compute_extrema3D, load_image, templet_matching_TF, templet_matching_CV2, \
     make_neighborhood2D, compute_central_gradient3D, compute_hessian_3D, Octave, KeyPoints
 from tensorflow.python.keras import backend
-from collections import namedtuple
+from viz import show_key_points, show_images, plot_matches_TF, plot_matches_CV2
 
 # https://www.cs.ubc.ca/~lowe/papers/ijcv04.pdf
 
@@ -12,97 +12,6 @@ linalg_ops = tf.linalg
 math_ops = tf.math
 bitwise_ops = tf.bitwise
 image_ops = tf.image
-
-
-def load_image(name: str) -> tf.Tensor:
-    im = tf.keras.utils.load_img(name, color_mode='grayscale')
-    im = tf.convert_to_tensor(tf.keras.utils.img_to_array(im), dtype=tf.float32)
-    return im[tf.newaxis, ...]
-
-
-def show_key_points(key_points, img):
-    from viz import show_images
-
-    cords = tf.cast(key_points.pt, dtype=tf.int64)
-    cords = tf.concat((cords, tf.zeros((key_points.shape[0], 1), dtype=tf.int64)), -1)
-
-    marks = make_neighborhood2D(cords, con=3, origin_shape=img.shape)
-    marks = tf.reshape(marks, shape=(-1, 4))
-
-    marked = tf.scatter_nd(marks, tf.ones(shape=(marks.get_shape()[0],), dtype=tf.float32) * 255.0, shape=img.shape)
-    marked_del = math_ops.abs(marked - 255.0) / 255.0
-    img_mark = img * marked_del
-
-    marked = tf.concat((marked, tf.zeros_like(img), tf.zeros_like(img)), axis=-1)
-
-    img_mark = img_mark + marked
-    show_images(img_mark, 1, 1)
-
-
-def templet_matching(tmp_img, dst_img, tmp_kp, dst_kp, tmp_dsc, dst_dsc):
-    import cv2
-    import numpy as np
-    from viz import show_images
-
-    FLANN_INDEX_KDTREE = 0
-    index_params = dict(algorithm=FLANN_INDEX_KDTREE, trees=5)
-    search_params = dict(checks=50)
-    flann = cv2.FlannBasedMatcher(index_params, search_params)
-
-    tmp_dsc = tmp_dsc.numpy()
-    dst_dsc = dst_dsc.numpy()
-
-    matches = flann.knnMatch(tmp_dsc, dst_dsc, k=2)
-
-    good = []
-    for m, n in matches:
-        if m.distance < 0.7 * n.distance:
-            good.append(m)
-
-    if len(good) < 2:
-        print('number of matches smaller then 2')
-        return
-
-    good.sort(key=lambda x: x.distance)
-    good = good[:min(len(good), 50)]
-
-    src_index = [m.queryIdx for m in good]
-    dst_index = [m.trainIdx for m in good]
-
-    src_pt = tf.gather(tmp_kp.to_image_size().pt, tf.constant(src_index, dtype=tf.int32))
-    dst_pt = tf.gather(dst_kp.to_image_size().pt, tf.constant(dst_index, dtype=tf.int32))
-
-    src_pt = tf.split(src_pt, [1, 2], -1)[1].numpy().astype(int).reshape(-1, 1, 2)
-    dst_pt = tf.split(dst_pt, [1, 2], -1)[1].numpy().astype(int).reshape(-1, 1, 2)
-
-    # M = cv2.findHomography(src_pt, dst_pt, cv2.RANSAC, 5.0)[0]
-    #
-    # _, h, w, _ = tmp_img.shape
-    #
-    # pts = np.float32([[0, 0],
-    #                   [0, h - 1],
-    #                   [w - 1, h - 1],
-    #                   [w - 1, 0]]).reshape(-1, 1, 2)
-    # dst = cv2.perspectiveTransform(pts, M)
-
-    # dst_img = cv2.polylines(tf.squeeze(dst_img).numpy().astype('uint8'), [np.int32(dst)], True, 255, 3, cv2.LINE_AA)
-
-    _, h1, w1, _ = tmp_img.shape
-    _, h2, w2, _ = dst_img.shape
-    nWidth = w1 + w2
-    nHeight = max(h1, h2)
-    hdif = int((h2 - h1) / 2)
-    newimg = np.zeros((nHeight, nWidth, 3), np.uint8)
-
-    for i in range(3):
-        newimg[hdif:hdif + h1, :w1, i] = tf.squeeze(tmp_img).numpy().astype('uint8')
-        newimg[:h2, w1:w1 + w2, i] = tf.squeeze(dst_img).numpy().astype('uint8')
-
-    for i in range(src_pt.shape[0]):
-        pt1 = (int(src_pt[i, 0, 1]), int(src_pt[i, 0, 0] + hdif))
-        pt2 = (int(dst_pt[i, 0, 1] + w1), int(dst_pt[i, 0, 0]))
-        cv2.line(newimg, pt1, pt2, (255, 0, 0))
-    show_images([newimg], 1, 1)
 
 
 class SIFT:
@@ -601,12 +510,17 @@ class SIFT:
 
 if __name__ == '__main__':
     image1 = load_image('box.png')
-    image2 = load_image('box_in_scene.png')
 
     alg = SIFT()
 
     kp1, desc1 = alg.keypoints_with_descriptors(image1)
-    # show_key_points(kp1.to_image_size(), image1)
+    # show_key_points(kp1, image1)
+
+    image2 = load_image('box_in_scene.png')
     kp2, desc2 = alg.keypoints_with_descriptors(image2)
 
-    # templet_matching(image1, image2, kp1, kp2, desc1, desc2)
+    src_pt, dst_pt = templet_matching_TF(kp1, kp2, desc1, desc2)
+    plot_matches_TF(image1, image2, src_pt, dst_pt)
+
+    src_pt, dst_pt = templet_matching_CV2(kp1, kp2, desc1, desc2)
+    plot_matches_CV2(image1, image2, src_pt, dst_pt)
