@@ -405,6 +405,7 @@ class SIFT:
 
         for region_weight, r, hist_index in zip(split_region, parallel.y, index):
             region, weight = tf.split(region_weight, [4, 1], -1)
+            if r < 1: continue
 
             neighbor = make_neighborhood2D(tf.constant([[0, 0, 0, 0]], dtype=tf.int64), con=(r * 2) + 1)
             block = tf.expand_dims(tf.cast(region, tf.int64), axis=1) + neighbor
@@ -487,7 +488,7 @@ class SIFT:
 
         for keys, index, oc_id in zip(split_by_oc, indexes, parallel.y):
             oc_desc = self.__descriptors_per_octave(self.octave_pyramid[int(oc_id)], keys)
-            condition_indices.append(tf.squeeze(index))
+            condition_indices.append(tf.squeeze(index, -1))
             partitioned_data.append(oc_desc)
 
         descriptors = tf.dynamic_stitch(condition_indices, partitioned_data)
@@ -531,7 +532,6 @@ class SIFT:
     ) -> tuple[KeyPoints, tf.Tensor]:
         if keep_as_templet and self.templet_capture: raise Warning('prev templet will be removed')
         self.build_pyramid(inputs)
-
         key_points = KeyPoints()
         key_points.relies_scale_index()
 

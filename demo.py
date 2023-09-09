@@ -3,7 +3,7 @@ from utils import load_image, templet_matching_TF, templet_matching_CV2
 from sift import SIFT
 
 if __name__ == '__main__':
-    image1 = load_image('box.png')
+    image1 = load_image('tmplt2.jpeg')
 
     alg = SIFT()
 
