@@ -482,7 +482,8 @@ def templet_matching_TF(
         scr_kp: KT,
         dst_kp: KT,
         scr_dsc: tf.Tensor,
-        dst_dsc: tf.Tensor
+        dst_dsc: tf.Tensor,
+        ratio_threshold: float = 0.7
 ) -> tuple[Union[list[tf.Tensor], tf.Tensor], Union[list[tf.Tensor], tf.Tensor]]:
     if not isinstance(scr_kp, KeyPoints) or not isinstance(dst_kp, KeyPoints):
         raise TypeError('Key points need to be of type "KeyPoints"')
@@ -507,7 +508,7 @@ def templet_matching_TF(
     values = tf.gather(diff, indices, batch_dims=-1)
 
     m_dist, n_dist = tf.unstack(values, 2, -1)
-    mask = tf.where(m_dist < 0.7 * n_dist, True, False)
+    mask = tf.where(m_dist < ratio_threshold * n_dist, True, False)
 
     des_index = tf.boolean_mask(tf.unstack(indices, 2, -1)[0], mask)
     scr_index = tf.cast(tf.squeeze(tf.where(mask)), tf.int32)
@@ -521,7 +522,8 @@ def templet_matching_CV2(
         scr_kp: KT,
         dst_kp: KT,
         scr_dsc: tf.Tensor,
-        dst_dsc: tf.Tensor
+        dst_dsc: tf.Tensor,
+        ratio_threshold: float = 0.7
 ) -> tuple[tf.Tensor, tf.Tensor]:
     if not isinstance(scr_kp, KeyPoints) or not isinstance(dst_kp, KeyPoints):
         raise TypeError('Key points need to be of type "KeyPoints"')
@@ -547,8 +549,10 @@ def templet_matching_CV2(
 
     good = []
     for m, n in matches:
-        if m.distance < 0.7 * n.distance:
+        if m.distance < ratio_threshold * n.distance:
             good.append(m)
+
+    good.sort(key=lambda m: m.distance)
 
     src_index = [m.queryIdx for m in good]
     dst_index = [m.trainIdx for m in good]

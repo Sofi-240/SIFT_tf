@@ -31,6 +31,9 @@ class SIFT:
         self.octave_pyramid: list[Octave] = []
         self.templet_capture: Union[None, list[KeyPoints, tf.Tensor]] = None
 
+    def __repr__(self):
+        return f'S(sigma)={self.sigma}, AssumeBlurS={self.assume_blur_sigma}, ScalesPerOctave={self.n_intervals + 3}, NumOfOctaves={self.n_octaves}'
+
     def __init_graph(
             self,
             inputs: tf.Tensor
@@ -186,7 +189,7 @@ class SIFT:
             y, x = tf.unstack(neighbor, 2, -1)
             b = tf.cast(tf.ones(y.get_shape(), dtype=tf.int32) * index, tf.float32)
 
-            rotate = [((x * sin) + (y * cos)) / width, ((x * cos) - (y * sin)) / width]
+            rotate = [(- (x * sin) + (y * cos)) / width, ((x * cos) + (y * sin)) / width]
             weight = tf.reshape(math_ops.exp(weight_multiplier * (rotate[0] ** 2 + rotate[1] ** 2)), (-1,))
 
             magnitude = tf.gather_nd(M, tf.reshape(block, (-1, 4))) * weight
@@ -543,6 +546,7 @@ class SIFT:
 
         descriptors = self.write_descriptors(key_points)
         self.octave_pyramid = []
+        self.n_octaves = None
         if keep_as_templet:
             self.templet_capture = [key_points, descriptors]
         return key_points, descriptors
