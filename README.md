@@ -6,7 +6,7 @@ These features can be used for various computer vision tasks such as object reco
 
 This Python implementation of the SIFT algorithm uses TensorFlow for efficient image processing.
 
-![](demo_figs\\demo_gif.gif)
+![](demo_gif.gif)
 
 ## **Prerequisites**
 
